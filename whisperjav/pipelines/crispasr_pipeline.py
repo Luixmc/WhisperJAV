@@ -29,7 +29,12 @@ from typing import Dict, Optional
 import srt
 
 from whisperjav.pipelines.base_pipeline import BasePipeline
-from whisperjav.pipelines.crispasr_runner import run_crispasr, DEFAULT_BACKEND
+from whisperjav.pipelines.crispasr_runner import (
+    DEFAULT_BACKEND,
+    MIN_DURATION_MS,
+    enforce_min_duration,
+    run_crispasr,
+)
 from whisperjav.modules.audio_extraction import AudioExtractor
 from whisperjav.modules.srt_postprocessing import normalize_language_code
 from whisperjav.utils.logger import logger
@@ -177,7 +182,8 @@ class CrispASRPipeline(BasePipeline):
 
             # Step 3: Place the SRT at WhisperJAV's standard output path.
             # CrispASR is a complete provider — its SRT is consumed as-is
-            # (no WhisperJAV sanitizer / regroup), the SubtitleEdit model.
+            # (no WhisperJAV sanitizer / regroup), the SubtitleEdit model,
+            # except for the minimum on-screen time below.
             self.progress.set_current_step("Finalizing subtitles", 3, 3)
             logger.info("Step 3/3: Finalizing subtitles...")
             self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -185,6 +191,14 @@ class CrispASRPipeline(BasePipeline):
                 self.output_dir / f"{media_basename}.{self.lang_code}.whisperjav.srt"
             )
             shutil.copy2(crispasr_srt, final_srt_path)
+            # Timings only: lines the aligner left with no time on screen
+            # get the minimum (see crispasr_runner.enforce_min_duration).
+            lengthened = enforce_min_duration(final_srt_path)
+            if lengthened:
+                logger.info(
+                    f"  {lengthened} subtitle(s) too short to be seen were given "
+                    f"{MIN_DURATION_MS} ms on screen"
+                )
 
             # Count subtitles for the result-summary contract that the
             # ensemble worker / batch reporter expect.

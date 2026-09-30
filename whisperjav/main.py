@@ -445,10 +445,11 @@ def parse_arguments():
                                 help="Path to the crispasr external executable "
                                      "(required for --mode crispasr or --passN-pipeline crispasr)")
     crispasr_group.add_argument("--crispasr-backend", default="parakeet",
-                                choices=["whispercpp", "parakeet", "cohere"],
+                                choices=["whispercpp", "parakeet", "cohere", "qwen3-1.7b"],
                                 help="CrispASR ASR backend (default: parakeet). "
-                                     "'whispercpp' = crispasr's whisper backend (defaults to large-v2). "
-                                     "All curated backends emit native word timestamps; no aligner needed.")
+                                     "'whispercpp' = crispasr's whisper backend (large-v3 q5_0, Silero VAD). "
+                                     "'qwen3-1.7b' = Qwen3-ASR 1.7B + Qwen3 forced aligner (recommended for AMD GPUs on a Vulkan build). "
+                                     "Backend defaults (VAD, aligner) are set by WhisperJAV; --crispasr-args can override them.")
     crispasr_group.add_argument("--crispasr-args", default="",
                                 help="Extra arguments passed verbatim to crispasr "
                                      "(shlex-split, appended to argv). Single escape valve "

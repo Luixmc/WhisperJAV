@@ -1375,13 +1375,14 @@ const EnsembleManager = {
     // CrispASR curated backend set (CL1, revised 2026-05-16). The per-pass
     // "Model" column doubles as the CrispASR backend selector
     // (--crispasr-backend). v1.9.0 first release: parakeet (default),
-    // whispercpp (alias of crispasr's whisper backend, large-v2), cohere.
-    // All emit native word timestamps; none needs a forced aligner.
+    // whispercpp (alias of crispasr's whisper backend, large-v3 + VAD), cohere.
+    // AMD fork: qwen3-1.7b (Qwen3 forced aligner, set in crispasr_runner).
     // canary + kyutai-stt deferred (CL1(d)/(e)).
     crispasrModels: [
         { value: 'parakeet', label: 'parakeet (native word ts)' },
-        { value: 'whispercpp', label: 'whispercpp (whisper.cpp large-v2)' },
-        { value: 'cohere', label: 'cohere (native word ts)' }
+        { value: 'whispercpp', label: 'whispercpp (whisper.cpp large-v3 + VAD)' },
+        { value: 'cohere', label: 'cohere (native word ts)' },
+        { value: 'qwen3-1.7b', label: 'qwen3-1.7b (Qwen3-ASR + aligner, AMD/Vulkan)' }
     ],
 
     async init() {

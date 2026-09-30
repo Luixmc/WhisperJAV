@@ -9,10 +9,15 @@ CrispASR is a self-contained external ASR engine (a C++/ggml binary from the [Cr
 | Backend | Engine | Notes |
 |---------|--------|-------|
 | **parakeet** *(default)* | NVIDIA Parakeet | Native word timestamps; good speed/quality |
-| **whispercpp** | whisper.cpp (large-v2) | Native word timestamps; alias of crispasr's `whisper` backend |
+| **whispercpp** | whisper.cpp (large-v3 q5_0) | Native word timestamps; alias of crispasr's `whisper` backend; runs with Silero VAD |
 | **cohere** | Cohere Transcribe | Native word timestamps; open ggml asset (no token) |
+| **qwen3-1.7b** | Qwen3-ASR 1.7B | Timestamps from the Qwen3 forced aligner + Silero VAD; best Japanese text in testing. Recommended on AMD GPUs (Vulkan build) |
 
-All three need **no forced aligner**. The model GGUF auto-downloads on first use.
+WhisperJAV sets each backend's defaults (VAD, aligner); `--crispasr-args` is appended last and can override them. The model GGUF auto-downloads on first use.
+
+### AMD GPUs
+
+CTranslate2 (balanced / faster) has no AMD backend, but CrispASR's **Vulkan** build runs on AMD Radeon cards with the regular Adrenalin driver — no ROCm needed. On an RX 9060 XT, a 20-minute Japanese video took 63 s with `qwen3-1.7b` and 40 s with `whispercpp`. Use `crispasr-windows-x86_64-vulkan.zip` (Windows) or `crispasr-linux-x86_64-vulkan.tar.gz` / `-hip` (Linux).
 
 ---
 
@@ -87,7 +92,8 @@ The engine self-manages models. On first use of a backend it downloads the GGUF 
 
 - The engine binary is not bundled — you download it once yourself
 - Models pull from a mutable HuggingFace branch with no checksum (engine behavior)
-- `whispercpp` requests large-v2 via the engine's auto mechanism — confirm it resolves on your build (override with `--crispasr-args -m <...>` if needed)
+- `whispercpp` uses large-v3 q5_0 via `--hf-repo`; pass `--crispasr-args "-m <path>"` to use another model (the `-m auto:<variant>` form is not parsed by CrispASR 0.8.38)
+- On Windows the engine cannot open non-ASCII paths; WhisperJAV runs it on an ASCII-named copy of the audio and keeps its model cache on an ASCII path (the 8.3 short form of the user folder, or the temp directory)
 - `--subs-language direct-to-english` is not specially handled for CrispASR
 - First run per backend pauses for the model download
 

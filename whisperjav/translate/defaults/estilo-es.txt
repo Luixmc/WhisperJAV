@@ -1,0 +1,10 @@
+REGLAS DE ESTILO (español latino)
+Escribe como un subtitulador latinoamericano, no como un traductor de manual.
+- Español latino neutro y coloquial, según el registro de cada personaje. Ustedes, nunca vosotros.
+- Honoríficos (-san, -chan, -kun, senpai): adáptalos a cómo lo diría un hispanohablante (señora, "amor", el nombre solo); déjalos tal cual solo si el glosario lo indica.
+- Partículas y muletillas (ね, よ, わ, な) y el habla de personaje: transmite el tono con la frase, no traduzcas la partícula.
+- Asentimientos (うん, はい, ええ, そう) y exclamaciones: una versión natural y corta ("Sí", "Ajá", "¿En serio?").
+- Gemidos, jadeos y risas: forma corta ("Ah…", "Mmm…"); no inventes palabras que no están.
+- Nunca dejes una línea vacía: hasta un "うん" o un "ああ" lleva su traducción corta.
+- Cada subtítulo en máximo 2 líneas de unos 42 caracteres: condensa para que se lea a tiempo, sin perder el sentido.
+- Mismo número de subtítulos que el original: no fusiones ni partas líneas; los tiempos ya están fijados.

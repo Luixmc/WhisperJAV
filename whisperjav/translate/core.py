@@ -3,6 +3,7 @@ Core translation logic - PySubtrans wrapper.
 """
 
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -119,6 +120,116 @@ def apply_deepseek_thinking_patch(translator, model: str, debug: bool = False) -
 
     client._generate_request_body = _patched
     print(f"[TRANSLATE]   DeepSeek thinking mode: DISABLED for {model}", file=sys.stderr)
+    return True
+
+
+def should_disable_gemma_reasoning(model: str) -> bool:
+    """Whether *model* is a Gemma 4 build, which reasons unless told not to.
+
+    Left alone, Gemma 4 thinks before every batch: on LM Studio 85-92% of the
+    completion tokens of a translation batch were reasoning (2,300-3,900 of
+    2,700-4,300), about two minutes a batch on a 12B model, and with a tight
+    max_tokens it can spend them all and return an empty translation.
+    """
+    return bool(re.search(r"gemma[-_ ]?4", (model or "").lower()))
+
+
+def apply_gemma_reasoning_patch(translator, model: str, debug: bool = False) -> bool:
+    """Ask a Gemma 4 model not to reason, with ``reasoning_effort: none``.
+
+    Same mechanism as :func:`apply_deepseek_thinking_patch`: ``CustomClient``
+    builds a fixed body, so its builder is wrapped on the client instance.
+    Returns True if the patch was applied.
+    """
+    if not should_disable_gemma_reasoning(model):
+        return False
+
+    client = getattr(translator, 'client', None)
+    if client is None or not hasattr(client, '_generate_request_body'):
+        print("[TRANSLATE]   WARNING: could not disable Gemma reasoning - "
+              "translator.client._generate_request_body not found",
+              file=sys.stderr)
+        return False
+
+    original = client._generate_request_body
+
+    def _patched(request, temperature, _orig=original):
+        body = _orig(request, temperature)
+        try:
+            body['reasoning_effort'] = 'none'
+        except TypeError:
+            return body
+        if debug:
+            print("[TRANSLATE]   [gemma-patch] reasoning disabled", file=sys.stderr)
+        return body
+
+    client._generate_request_body = _patched
+    print(f"[TRANSLATE]   Gemma reasoning: DISABLED for {model}", file=sys.stderr)
+    return True
+
+
+# Where a Japanese line can be split when it has no punctuation. PySubtrans
+# splits long lines only at punctuation (Helpers.Text.split_sequences), and
+# Qwen3-ASR can return a 30-second monologue without a single mark: the model
+# then spread its translation over the next lines' slots and every later line
+# in the batch came out shifted. These go after PySubtrans' own sequences, so
+# punctuation still wins:
+# 1. the end of a sentence (です, ました, んですか...), with its closing
+#    particle, and not when a conjunction follows (ですけど, ですが).
+# 2. failing that, hiragana followed by kanji or katakana, which usually
+#    starts a new word; not after the honorific お/ご (お父さん).
+JAPANESE_SPLIT_SEQUENCES = [
+    r"(?:んです|んでしょう|ですね|ますね|です|ます|ました|でした|ません|ください|けれど|けど|から|ので)"
+    r"(?:かねえ|よね|ねえ|かね|ね|よ|か|な)?(?=\S)(?!けれ|けど|が|し|から|ので)",
+    r"(?<=\p{Hiragana})(?<![おご])(?=[\p{Han}\p{Katakana}])",
+]
+
+
+def add_japanese_split_points() -> bool:
+    """Let PySubtrans split long Japanese lines that carry no punctuation.
+
+    ``SubtitleProcessor`` reads the module-level ``split_sequences`` list when
+    it is built, so the sequences are appended to that list once per process.
+    Returns True if they were added now.
+    """
+    from PySubtrans.Helpers import Text
+
+    added = False
+    for sequence in JAPANESE_SPLIT_SEQUENCES:
+        if sequence not in Text.split_sequences:
+            Text.split_sequences.append(sequence)
+            added = True
+    return added
+
+
+_NO_WORDS = re.compile(r"^[\W_]*$")
+
+
+def drop_punctuation_only_lines() -> bool:
+    """Leave out of the translation the subtitles that carry no words at all.
+
+    CrispASR's Qwen3-ASR writes a lone "。" about every 28 seconds through
+    long stretches without speech. There is nothing to translate, so the
+    model returns them blank, PySubtrans takes the blanks as errors, and the
+    retries of those batches dropped real short lines with them (61 of 198
+    lines were missing from a 105-minute video). ``PreprocessSubtitles``
+    already skips lines left empty by ``_preprocess_line``, so the class
+    method is wrapped once per process to empty the wordless ones.
+    Returns True if it was wrapped now.
+    """
+    from PySubtrans.SubtitleProcessor import SubtitleProcessor
+
+    original = SubtitleProcessor._preprocess_line
+    if getattr(original, '_drops_wordless', False):
+        return False
+
+    def _preprocess_line(self, line):
+        original(self, line)
+        if line.text and _NO_WORDS.match(line.text):
+            line.text = ""
+
+    _preprocess_line._drops_wordless = True
+    SubtitleProcessor._preprocess_line = _preprocess_line
     return True
 
 
@@ -358,6 +469,21 @@ def translate_subtitle(
             print(f"[TRANSLATE]   Thinking model: YES (will patch response parsing)",
                   file=sys.stderr)
 
+        # The work's notes, glossary and slang (translate/ficha/). Loaded before
+        # anything else so that tags which stop the work stop it before anything
+        # is written. They ride along with every batch, so where the batch size
+        # was capped to a local model's context (cap_batch_size_for_context),
+        # make room for them.
+        from whisperjav.translate.ficha import contexto as ficha_contexto
+        _ficha = ficha_contexto.cargar(input_path, target_lang)
+        if _ficha and (provider_config.get('max_tokens')
+                       or provider_config.get('whisperjav_provider') in ('local', 'ollama')):
+            _lote = _ficha.ajustar_lote(max_batch_size)
+            if _lote < max_batch_size:
+                print(f"[TRANSLATE]   Batch size reduced from {max_batch_size} to {_lote} "
+                      f"to make room for the work's notes", file=sys.stderr)
+                max_batch_size = _lote
+
         # Resolve a batch window PySubtrans will accept.  The caller supplies
         # only a ceiling; if it has been capped below PySubtrans' default floor
         # of 10, passing that floor through raises before any translation runs
@@ -550,6 +676,12 @@ def translate_subtitle(
                 except OSError as _e:
                     print(f"[TRANSLATE]   Warning: Could not delete .subtrans: {_e}", file=sys.stderr)
 
+        if drop_punctuation_only_lines():
+            print("[TRANSLATE]   Subtitles without words (a lone '。') are left out", file=sys.stderr)
+        if (source_lang or '').lower() == 'japanese' and add_japanese_split_points():
+            print("[TRANSLATE]   Japanese split points: added (long unpunctuated lines "
+                  "are split before translation)", file=sys.stderr)
+
         # Initialize project (PySubtrans 1.5.x expects subtitle path in 'filepath' kwarg)
         print(f"[TRANSLATE] Loading subtitle project...", file=sys.stderr)
         project = init_project(options, filepath=str(input_path), persistent=True)
@@ -597,6 +729,13 @@ def translate_subtitle(
         # Initialize translator and translate
         print(f"[TRANSLATE] Initializing translator...", file=sys.stderr)
         translator = init_translator(options, translation_provider=provider)
+        if _ficha:
+            _ficha.enganchar(translator)
+
+        # Catch batches whose translations landed on the wrong lines, so that
+        # PySubtrans' retry_on_error asks for them again (translate/alineacion.py).
+        from whisperjav.translate import alineacion
+        alineacion.vigilar(translator)
 
         # =====================================================================
         # DeepSeek: turn reasoning off for v4-flash (#395)
@@ -605,6 +744,13 @@ def translate_subtitle(
         # rate-limit hungry, and can leak reasoning text into the subtitles.
         if provider_config.get('pysubtrans_name') == 'DeepSeek':
             apply_deepseek_thinking_patch(translator, model, debug=debug)
+
+        # Gemma 4 on an OpenAI-compatible server (LM Studio, llama.cpp): turn
+        # reasoning off. Not for Ollama, whose handling of reasoning_effort
+        # has not been checked here.
+        if (provider_config.get('pysubtrans_name') == 'Custom Server'
+                and provider_config.get('whisperjav_provider') != 'ollama'):
+            apply_gemma_reasoning_patch(translator, model, debug=debug)
 
         # =====================================================================
         # Qwen3 thinking model workaround: patch response parsing

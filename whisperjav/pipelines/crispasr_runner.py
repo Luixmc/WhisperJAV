@@ -12,11 +12,13 @@ crash by checking the SRT before the exit code).
 Argv form verified vs CrispASR ``docs/cli.md`` (Phase-1 R-2 resolution,
 ``docs/plans/crispasr_v190/08`` §1/§3a)::
 
-    crispasr -m <auto|auto:large-v2> --backend <whisper|parakeet|cohere>
+    crispasr <-m auto | --hf-repo REPO:FILE>
+             --backend <whisper|parakeet|cohere|qwen3-1.7b>
              -f <input.wav> -l <lang> -osrt -of <outbase>
-             [extra args]                              -> writes <outbase>.srt
+             [per-backend defaults] [extra args]       -> writes <outbase>.srt
 
-    (v1.9.0 curated backends need no forced aligner; canary deferred.)
+    (Per-backend defaults: VAD for whisper; VAD + Qwen3 forced aligner for
+    qwen3-1.7b, which has no native timestamps. See BACKEND_DEFAULT_ARGS.)
 
 Design:  docs/plans/crispasr_v190/08_crispasr_simple_pipeline_design.md
 Durable record:  memory/feedback_crispasr_simple_standalone_pipeline.md
@@ -25,11 +27,13 @@ Durable record:  memory/feedback_crispasr_simple_standalone_pipeline.md
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 # ---------------------------------------------------------------------------
 # CL1 — backend curation (user decision 2026-05-15, revised 2026-05-16)
@@ -48,7 +52,11 @@ from typing import Optional
 # ``canary`` and ``kyutai-stt`` are intentionally REMOVED for the first
 # release (CL1(d)/(e)): canary deferred to keep all forced-aligner /
 # timestamp complexity out of v1.9.0; kyutai-stt deferred. Re-add later.
-CURATED_BACKENDS = ("whispercpp", "parakeet", "cohere")
+#
+# AMD fork: ``qwen3-1.7b`` added (Qwen3-ASR 1.7B GGUF). On a Vulkan build it
+# is the recommended backend for AMD GPUs, which have no CUDA path — see the
+# per-backend args below for the forced aligner it needs.
+CURATED_BACKENDS = ("whispercpp", "parakeet", "cohere", "qwen3-1.7b")
 DEFAULT_BACKEND = "parakeet"
 
 # WhisperJAV-facing name -> the actual crispasr ``--backend`` value.
@@ -56,20 +64,33 @@ DEFAULT_BACKEND = "parakeet"
 # the others pass through unchanged.
 BACKEND_ALIAS = {"whispercpp": "whisper"}
 
-# Per-backend ``-m`` model spec. ``DEFAULT_MODEL_SPEC`` ("auto") lets the
-# engine self-download its registry-default GGUF (D5a — WhisperJAV writes no
-# download code). ``whispercpp`` overrides to large-v2 because the engine's
-# bare ``whisper`` default is ggml-base (CL1(c): "large-v2 default and auto").
-# The ``auto[:variant]`` form follows docs/cli.md ``-m PATH|auto[:variant]``;
-# the exact accepted variant token (``auto:large-v2``) is NOT runtime-verified
-# in the dev env (manual-verify before release — doc 08 §5; ``--crispasr-args
-# -m <...>`` is the override escape valve).
-DEFAULT_MODEL_SPEC = "auto"
-BACKEND_MODEL_SPEC = {"whispercpp": "auto:large-v2"}
+# Per-backend model selection argv. ``-m auto`` lets the engine self-download
+# its registry-default GGUF (D5a — WhisperJAV writes no download code).
+# ``whispercpp`` needs an explicit model because the engine's bare ``whisper``
+# default is ggml-base (too weak). Runtime-verified on CrispASR 0.8.38: the
+# ``-m auto:large-v2`` variant form is NOT parsed — it resolves to ggml-base —
+# so the model is named via ``--hf-repo`` instead. large-v3 q5_0 (1.1 GB) is
+# the build validated on Japanese audio. A model flag in ``--crispasr-args``
+# replaces this default (see build_crispasr_argv).
+DEFAULT_MODEL_ARGS = ["-m", "auto"]
+BACKEND_MODEL_ARGS = {
+    "whispercpp": ["--hf-repo", "ggerganov/whisper.cpp:ggml-large-v3-q5_0.bin"],
+}
 
-# No curated backend needs a forced aligner in v1.9.0 (canary deferred).
-# The aligner machinery is intentionally absent to keep the first release
-# simple; re-introduce a per-backend aligner map when canary returns.
+# Per-backend default argv, validated on a 20-minute JAV sample (CrispASR
+# 0.8.38, Vulkan):
+#   * whispercpp — without VAD it looped one hallucinated line 247 times over
+#     non-speech stretches; Silero VAD removes the loop.
+#   * qwen3-1.7b — no native timestamps. ``-am auto`` picks the canary CTC
+#     aligner, which collapsed on Japanese in 64 of 73 slices; the Qwen3
+#     forced aligner works. ``-sp`` splits the aligned text into one sentence
+#     per cue (avg 3.1 s instead of 10.6 s).
+BACKEND_DEFAULT_ARGS = {
+    "whispercpp": ["--vad", "-vm", "silero"],
+    "qwen3-1.7b": ["-am", "qwen3-forced-aligner", "--vad", "-vm", "silero", "-sp"],
+}
+
+_MODEL_FLAGS = {"-m", "--model", "-hfr", "--hf-repo"}
 
 
 def run_crispasr(
@@ -119,40 +140,75 @@ def run_crispasr(
     # crispasr writes ``<outbase>.srt`` for the -osrt/-of output pair.
     outbase = str(Path(output_dir) / Path(input_file).stem)
 
-    # Resolve the WhisperJAV-facing name to the real crispasr backend id and
-    # pick the per-backend model spec (whispercpp -> large-v2; else auto).
-    crispasr_backend = BACKEND_ALIAS.get(backend, backend)
-    model_spec = BACKEND_MODEL_SPEC.get(backend, DEFAULT_MODEL_SPEC)
+    # The engine cannot open non-ASCII paths on Windows (Japanese file names,
+    # accented user names): run it on an ASCII-named copy, move the SRT back.
+    run_input, run_outbase, stage_dir = _stage_for_engine(input_file, outbase, exe)
+    try:
+        srt_path = _run_engine(
+            exe, backend, run_input, language, run_outbase, extra_args
+        )
+        if stage_dir is not None:
+            final = Path(outbase + ".srt")
+            shutil.move(str(srt_path), str(final))
+            srt_path = final
+        return srt_path
+    finally:
+        if stage_dir is not None:
+            shutil.rmtree(stage_dir, ignore_errors=True)
 
-    cmd = [
+
+def build_crispasr_argv(
+    exe: Path,
+    backend: str,
+    input_file: str,
+    language: str,
+    outbase: str,
+    extra_args: str = "",
+) -> List[str]:
+    """Build the crispasr argv for a curated ``backend``.
+
+    Order: model selection, the fixed I/O flags, the per-backend defaults
+    (VAD / aligner), then the user's ``extra_args`` last so they can
+    override scalar options. A model flag in ``extra_args`` replaces the
+    default model selection instead of being passed alongside it.
+    """
+    user_args = shlex.split(extra_args.strip()) if extra_args and extra_args.strip() else []
+    if _MODEL_FLAGS.intersection(user_args):
+        model_args = []
+    else:
+        model_args = BACKEND_MODEL_ARGS.get(backend, DEFAULT_MODEL_ARGS)
+
+    return [
         str(exe),
-        "-m", model_spec,        # engine self-manages its model cache (D5a)
-        "--backend", crispasr_backend,
+        *model_args,             # engine self-manages its model cache (D5a)
+        "--backend", BACKEND_ALIAS.get(backend, backend),
         "-f", str(input_file),   # documented canonical input flag
         "-l", language,
         "-osrt",
         "-of", outbase,
+        *BACKEND_DEFAULT_ARGS.get(backend, []),
+        *user_args,
     ]
 
-    # No curated v1.9.0 backend needs a forced aligner (canary deferred).
 
-    # Passthrough user-supplied extra args (shell-aware splitting).
-    if extra_args and extra_args.strip():
-        cmd.extend(shlex.split(extra_args.strip()))
+def _run_engine(
+    exe: Path,
+    backend: str,
+    input_file: str,
+    language: str,
+    outbase: str,
+    extra_args: str,
+) -> Path:
+    """Run crispasr once and return the SRT it produced (see run_crispasr)."""
+    cmd = build_crispasr_argv(exe, backend, input_file, language, outbase, extra_args)
+    engine_out_dir = str(Path(outbase).parent)
 
     # WhisperJAV writes NO download/verify code (D5a).  The engine
     # self-manages models via ``-m auto``; we only redirect its cache into a
     # dedicated subdir under WhisperJAV's cache namespace without colliding
     # with the HF-hub blob layout, honoring I1's intent.
     env = {**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1"}
-    env.setdefault(
-        "CRISPASR_CACHE_DIR",
-        str(
-            Path(os.environ.get("XDG_CACHE_HOME") or (Path.home() / ".cache"))
-            / "whisperjav"
-            / "crispasr_models"
-        ),
-    )
+    env.setdefault("CRISPASR_CACHE_DIR", str(_default_cache_dir(exe)))
 
     start_time = time.monotonic()
     # Wall-clock stamp for _find_srt: only SRT files written DURING this run
@@ -196,7 +252,7 @@ def run_crispasr(
     # process shutdown (the class of issue WhisperJAV's Nuclear Exit solves);
     # the transcription completes first.
     # 1) A file the engine wrote (if this build honours -osrt/-of).
-    srt_path = _find_srt(output_dir, input_file, outbase, run_started_wall)
+    srt_path = _find_srt(engine_out_dir, input_file, outbase, run_started_wall)
     # 2) Otherwise synthesise it from the captured stdout (the robust path).
     if srt_path is None:
         srt_path = _srt_from_stdout(stdout_text, outbase)
@@ -218,7 +274,7 @@ def run_crispasr(
         )
     raise RuntimeError(
         f"CrispASR completed ({elapsed:.1f}s) but produced no SRT file and "
-        f"no parseable transcript on stdout (output dir: {output_dir})\n{tail}"
+        f"no parseable transcript on stdout (output dir: {engine_out_dir})\n{tail}"
     )
 
 
@@ -316,3 +372,168 @@ def _srt_from_stdout(stdout_text: str, outbase: str) -> Optional[Path]:
         for idx, (start, end, text) in enumerate(blocks, 1):
             fh.write(f"{idx}\n{start} --> {end}\n{text}\n\n")
     return srt_path
+
+
+# ---------------------------------------------------------------------------
+# Minimum on-screen time
+# ---------------------------------------------------------------------------
+# Owner decision 2026-09-29, the one change to the engine's SRT besides its
+# placement: timings only, never text. Through bursts of screams and moans the
+# Qwen3 forced aligner finds no word boundaries and writes subtitles that last
+# no time at all (``10:33,920 --> 10:33,920``: 21 of 198 on a 105-minute
+# video, plus 10 under 0.3 s), often several at the same instant. A player
+# never shows them, translated or not.
+
+MIN_DURATION_MS = 800
+
+
+def _ms(ts: str) -> int:
+    h, m, rest = ts.split(":")
+    s, ms = rest.replace(".", ",").split(",")
+    return ((int(h) * 60 + int(m)) * 60 + int(s)) * 1000 + int(ms)
+
+
+def _ts(ms: int) -> str:
+    h, rest = divmod(max(0, ms), 3_600_000)
+    m, rest = divmod(rest, 60_000)
+    s, ms = divmod(rest, 1000)
+    return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
+
+
+def spread_short_subtitles(times: List[List[int]], minimum: int = MIN_DURATION_MS) -> int:
+    """Give every [start, end] (ms, in order) at least ``minimum`` on screen.
+
+    A subtitle that grows over the next one pushes the next one's start to its
+    own end, so several lines said at the same instant play one after another;
+    when the next one is long and a push would leave it under ``minimum``, the
+    two share the time up to the next one's end (at most ``minimum`` for this
+    one). Returns how many changed.
+    """
+    before = [tuple(t) for t in times]
+    shared = set()  # lines that split their time with the previous one
+    for i, (start, end) in enumerate(times):
+        if i not in shared:
+            end = max(end, start + minimum)
+        if i + 1 < len(times):
+            nxt = times[i + 1]
+            if nxt[0] < end:
+                if nxt[1] - end >= minimum or nxt[1] - nxt[0] < minimum:
+                    nxt[0] = end  # a short next line is lengthened on its own turn
+                else:
+                    end = max(nxt[0], start + min(minimum, (nxt[1] - start) // 2))
+                    nxt[0] = max(nxt[0], end)
+                    shared.add(i + 1)
+        times[i] = [start, end]
+    return sum(tuple(t) != b for t, b in zip(times, before))
+
+
+def enforce_min_duration(srt_path: Path, minimum: int = MIN_DURATION_MS) -> int:
+    """Rewrite ``srt_path`` so no subtitle is too short to be seen; returns how
+    many were changed (the file is left untouched when none)."""
+    text = Path(srt_path).read_text(encoding="utf-8", errors="replace")
+    blocks = []
+    for block in re.split(r"\n\s*\n", text.replace("\r\n", "\n").strip()):
+        lines = block.split("\n")
+        at = next((k for k, line in enumerate(lines) if "-->" in line), None)
+        if at is None:
+            continue
+        start, end = (part.strip().split(" ")[0] for part in lines[at].split("-->"))
+        blocks.append(([_ms(start), _ms(end)], "\n".join(lines[at + 1:])))
+    times = [t for t, _ in blocks]
+    changed = spread_short_subtitles(times, minimum)
+    if changed:
+        with open(srt_path, "w", encoding="utf-8") as fh:
+            for idx, ((start, end), body) in enumerate(zip(times, (b for _, b in blocks)), 1):
+                fh.write(f"{idx}\n{_ts(start)} --> {_ts(end)}\n{body}\n\n")
+    return changed
+
+
+# ---------------------------------------------------------------------------
+# Engine-safe paths (Windows)
+# ---------------------------------------------------------------------------
+# CrispASR 0.8.38 on Windows cannot open a path containing any non-ASCII
+# character: an input under a user folder such as ``C:\Users\José`` fails
+# with "input file not found", and a model cache there fails to download.
+# Japanese media names hit the same wall. The helpers below keep every path
+# handed to the engine ASCII.
+
+
+def _engine_safe(path) -> bool:
+    """True if crispasr can open ``path`` (always true off Windows)."""
+    return sys.platform != "win32" or str(path).isascii()
+
+
+def _windows_short_path(path: Path) -> Optional[Path]:
+    """8.3 short form of an existing path (e.g. ``JOSE~1``), if any."""
+    if sys.platform != "win32":
+        return None
+    try:
+        import ctypes
+
+        buf = ctypes.create_unicode_buffer(32768)
+        n = ctypes.windll.kernel32.GetShortPathNameW(str(path), buf, len(buf))
+        if 0 < n < len(buf):
+            return Path(buf.value)
+    except Exception:  # noqa: BLE001 - no short name is a normal outcome
+        pass
+    return None
+
+
+def _engine_safe_dir(preferred: Path, exe: Path, name: str) -> Path:
+    """First writable directory crispasr can open, trying ``preferred`` first.
+
+    Each candidate is also tried in its 8.3 short form, which keeps the same
+    physical location when the long form is not ASCII. Falls back to
+    ``preferred`` when nothing better exists; the engine's own error then
+    names the path.
+    """
+    candidates = [
+        preferred,
+        Path(tempfile.gettempdir()) / "whisperjav" / name,
+        exe.parent / f"_whisperjav_{name}",
+    ]
+    program_data = os.environ.get("ProgramData")
+    if program_data:
+        candidates.append(Path(program_data) / "WhisperJAV" / name)
+
+    for cand in candidates:
+        try:
+            cand.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            continue
+        if _engine_safe(cand):
+            return cand
+        short = _windows_short_path(cand)
+        if short is not None and _engine_safe(short):
+            return short
+    return preferred
+
+
+def _default_cache_dir(exe: Path) -> Path:
+    """Model cache for the engine: WhisperJAV's cache namespace, engine-safe."""
+    preferred = (
+        Path(os.environ.get("XDG_CACHE_HOME") or (Path.home() / ".cache"))
+        / "whisperjav"
+        / "crispasr_models"
+    )
+    return _engine_safe_dir(preferred, exe, "crispasr_models")
+
+
+def _stage_for_engine(input_file: str, outbase: str, exe: Path):
+    """Return ``(input, outbase, stage_dir)`` the engine can open.
+
+    Paths that are already safe pass through with ``stage_dir=None``.
+    Otherwise the input is hard-linked (or copied) into a fresh ASCII-named
+    run directory, which the caller removes after moving the SRT back.
+    """
+    if _engine_safe(input_file) and _engine_safe(outbase):
+        return input_file, outbase, None
+
+    stage_root = _engine_safe_dir(Path(outbase).parent, exe, "crispasr_work")
+    stage_dir = Path(tempfile.mkdtemp(prefix="run_", dir=str(stage_root)))
+    staged_input = stage_dir / ("input" + Path(input_file).suffix)
+    try:
+        os.link(input_file, staged_input)
+    except OSError:
+        shutil.copy2(input_file, staged_input)
+    return str(staged_input), str(stage_dir / "output"), stage_dir
