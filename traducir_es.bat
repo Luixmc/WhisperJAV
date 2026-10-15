@@ -11,10 +11,12 @@ set PYTHONIOENCODING=utf-8
 
 rem --- Ajustes -------------------------------------------------------------
 set MODELO=gemma-4-12b-it-qat
+rem TONO: standard, contextual, pornify (temperatura 1.0) o extrapornify (1.2)
 set TONO=contextual
 set LOTE=25
 rem Pon aqui --rehacer (volver a traducir), --sin-estudio, --mantener-modelo,
-rem --sin-javdb, --sin-mover (dejarlo todo junto al video), --salida "CARPETA"
+rem --sin-javdb, --sin-mover (dejarlo todo junto al video), --salida "CARPETA",
+rem --convertir (pasar antes los .ts a .mp4 sin recodificar)
 rem o --apagar (apaga la PC al terminar; se cancela con: shutdown /a)
 set EXTRA=
 rem -------------------------------------------------------------------------

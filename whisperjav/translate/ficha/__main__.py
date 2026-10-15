@@ -97,6 +97,16 @@ def originales(rutas: List[Path], idioma: str) -> List[Tuple[Path, Optional[Path
     return trabajos
 
 
+# Tones of the window and the batch: the name passed to whisperjav.translate.cli
+# and its temperature. extrapornify is pornify (same instructions) running hotter.
+TONOS = {
+    "standard": ("standard", None),
+    "contextual": ("contextual", None),
+    "pornify": ("pornify", 1.0),
+    "extrapornify": ("pornify", 1.2),
+}
+
+
 def transcribir(video: Path, crispasr: Path) -> bool:
     """Japanese subtitles for ``video`` with CrispASR (Vulkan, Qwen3-ASR)."""
     if not crispasr.is_file():
@@ -234,6 +244,10 @@ def traducir(args) -> int:
 
 
 def _traducir(args) -> int:
+    if args.convertir:
+        from whisperjav.translate.ficha.convertir import con_mp4, convertir
+        convertir(args.rutas)
+        args.rutas = con_mp4(args.rutas)
     trabajos = originales(args.rutas, args.idioma)
     if not trabajos:
         print("error: no hay videos ni .srt para traducir en lo que se indicó", file=sys.stderr)
@@ -282,9 +296,11 @@ def _traducir(args) -> int:
         command = [
             sys.executable, "-m", "whisperjav.translate.cli", "-i", str(srt), "-o", str(salida),
             "--provider", "custom", "--endpoint", f"{args.url.rstrip('/')}/v1",
-            "--api-key", "lm-studio", "-t", args.idioma, "--tone", args.tono,
+            "--api-key", "lm-studio", "-t", args.idioma, "--tone", TONOS[args.tono][0],
             "--max-batch-size", str(args.lote),
         ]
+        if TONOS[args.tono][1] is not None:
+            command += ["--temperature", str(TONOS[args.tono][1])]
         if args.modelo:
             command += ["--model", args.modelo]
         if subprocess.run(command).returncode != 0 or not salida.exists():
@@ -325,8 +341,9 @@ def main(argv=None) -> int:
     lote.add_argument("--crispasr", type=Path, default=CRISPASR,
                       help=f"ejecutable de CrispASR para transcribir videos (por defecto {CRISPASR})")
     lote.add_argument("--idioma", default="spanish", help="idioma de destino (por defecto spanish)")
-    lote.add_argument("--tono", default="contextual", choices=["standard", "contextual", "pornify"],
-                      help="tono de la traducción (por defecto contextual)")
+    lote.add_argument("--tono", default="contextual", choices=list(TONOS),
+                      help="tono de la traducción (por defecto contextual); pornify va a "
+                           "temperatura 1.0 y extrapornify, con sus mismas instrucciones, a 1.2")
     lote.add_argument("--lote", type=int, default=25, help="líneas por lote (por defecto 25)")
     lote.add_argument("--sin-estudio", dest="estudiar", action="store_false",
                       help="no estudiar las obras que no tienen ficha")
@@ -341,6 +358,8 @@ def main(argv=None) -> int:
                            "de la carpeta del video)")
     lote.add_argument("--sin-mover", dest="mover", action="store_false",
                       help="dejar todo junto al video en vez de moverlo a la carpeta de salida")
+    lote.add_argument("--convertir", action="store_true",
+                      help="convertir antes los .ts a .mp4 sin recodificar (los .ts no se borran)")
     lote.add_argument("--apagar", action="store_true",
                       help=f"apagar la computadora al terminar el lote (se cancela en {APAGAR_EN} s con shutdown /a)")
 
@@ -348,6 +367,9 @@ def main(argv=None) -> int:
     jdb.add_argument("srt", type=Path, help="el video o un subtítulo suyo (el código sale del nombre)")
     jdb.add_argument("--forzar", action="store_true", help="reemplazar el usuario.json que ya exista")
     _modelo(lote)
+
+    conv = commands.add_parser("convertir", help="convertir videos .ts a .mp4 sin recodificar")
+    conv.add_argument("rutas", type=Path, nargs="+", help="archivos .ts o carpetas")
 
     carpeta = commands.add_parser("carpeta", help="mostrar dónde van los diccionarios y la carpeta de una obra")
     carpeta.add_argument("srt", type=Path, nargs="?")
@@ -363,6 +385,9 @@ def main(argv=None) -> int:
             run(args.original, args.traducido, _cliente(args), limite=args.limite)
         elif args.comando == "traducir":
             return traducir(args)
+        elif args.comando == "convertir":
+            from whisperjav.translate.ficha.convertir import convertir
+            return 1 if convertir(args.rutas) else 0
         elif args.comando == "javdb":
             obra = Obra(args.srt)
             if not desde_javdb(args.srt, forzar=args.forzar):
