@@ -168,6 +168,8 @@ translate = [
     "openai>=1.35.0",     # GPT provider
     "google-genai>=1.39.0",  # Gemini provider
     "google-api-core>=2.14.0",  # Required by pysubtrans Gemini provider (undeclared transitive dep)
+    "customtkinter>=5.2",  # desktop app (python -m whisperjav.translate.ficha.app)
+    "pillow>=10.0",       # covers in the desktop app library
 ]
 
 # Local LLM support (server dependencies)

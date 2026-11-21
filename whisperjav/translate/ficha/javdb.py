@@ -51,6 +51,7 @@ class Obra:
     titulo_en: str = ""
     sinopsis: str = ""
     fuente: str = "JavDB"
+    portada: str = ""  # URL of the cover (front and back), when the site gives one
 
     def descripcion(self) -> str:
         """A short description for ``usuario.json``, in the study's language."""

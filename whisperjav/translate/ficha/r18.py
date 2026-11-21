@@ -50,6 +50,10 @@ def consultar(codigo_obra: str, timeout: float = 20) -> Optional[Obra]:
     if not datos:
         return None
     obra = Obra(codigo=codigo_obra, url=f"{BASE}combined={corto['content_id']}/json", fuente="r18.dev")
+    cid = corto["content_id"]
+    # The large cover (front on the right half); the JSON's own jacket URL is
+    # a smaller copy of the same picture.
+    obra.portada = f"https://awsimgsrc.dmm.co.jp/pics_dig/digital/video/{cid}/{cid}pl.jpg"
     obra.titulo = (datos.get("title_ja") or "").strip()
     obra.titulo_en = (datos.get("title_en_uncensored") or datos.get("title_en") or "").strip()
     obra.sinopsis = (datos.get("comment_en") or "").strip()

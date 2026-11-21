@@ -74,7 +74,7 @@ class Ventana:
         ttk.Combobox(opciones, textvariable=self.tono, values=list(TONOS), state="readonly", width=12).grid(
             row=0, column=3, sticky="w")
         ttk.Label(opciones, text="Líneas por lote").grid(row=1, column=0, sticky="w", padx=8, pady=6)
-        self.lote = tk.IntVar(value=25)
+        self.lote = tk.IntVar(value=16)
         ttk.Spinbox(opciones, from_=5, to=40, textvariable=self.lote, width=6).grid(row=1, column=1, sticky="w")
         self.estudiar = tk.BooleanVar(value=True)
         ttk.Checkbutton(opciones, text="Estudiar las obras sin ficha", variable=self.estudiar).grid(

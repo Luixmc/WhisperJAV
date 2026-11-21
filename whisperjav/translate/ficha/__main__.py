@@ -344,7 +344,7 @@ def main(argv=None) -> int:
     lote.add_argument("--tono", default="contextual", choices=list(TONOS),
                       help="tono de la traducción (por defecto contextual); pornify va a "
                            "temperatura 1.0 y extrapornify, con sus mismas instrucciones, a 1.2")
-    lote.add_argument("--lote", type=int, default=25, help="líneas por lote (por defecto 25)")
+    lote.add_argument("--lote", type=int, default=16, help="líneas por lote (por defecto 16)")
     lote.add_argument("--sin-estudio", dest="estudiar", action="store_false",
                       help="no estudiar las obras que no tienen ficha")
     lote.add_argument("--rehacer", action="store_true", help="volver a traducir aunque ya exista la traducción")

@@ -227,8 +227,11 @@ def _run_engine(
     # builds that DO honour ``-osrt``.
     # errors="replace" prevents UnicodeDecodeError when the external process
     # emits non-UTF-8 bytes (e.g. Windows system codepage for CJK filenames).
+    # stdin=DEVNULL: if a model is missing CrispASR asks "Download now? [Y/n]"
+    # and would wait forever; with EOF it downloads the model by itself.
     result = subprocess.run(
         cmd,
+        stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
